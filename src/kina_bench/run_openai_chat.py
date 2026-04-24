@@ -16,7 +16,7 @@ from tqdm.asyncio import tqdm_asyncio
 from kina_bench.config import PROJECT_ROOT
 from dotenv import find_dotenv, load_dotenv
 
-from kina_bench.utils import load_data, get_messages, judge_score, GPQA_METRICS
+from kina_bench.utils import load_data, get_messages, judge_score, KINA_PASS_AT_K_METRICS
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -111,7 +111,12 @@ async def process_with_semaphore(client, data_item, args, semaphore):
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_id', type=str, required=True)
-    parser.add_argument('--data_name', type=str, default="KINA-899")
+    parser.add_argument(
+        '--data_name',
+        type=str,
+        default="KINA-899-format-indexed",
+        help="Dataset JSON basename under data/ (without .json), e.g. KINA-899-format-indexed",
+    )
     parser.add_argument('--reasoning_effort', type=str, default=None)
     parser.add_argument('--think_mode', type=str, default="none", choices=["none", "think", "nothink"])
     parser.add_argument('--n_sampling', type=int, default=1)
@@ -124,9 +129,9 @@ async def main():
     args = parser.parse_args()
 
     assert args.think_mode in ["none", "think", "nothink"], args.think_mode
-    assert args.n_sampling in GPQA_METRICS, (
+    assert args.n_sampling in KINA_PASS_AT_K_METRICS, (
         f"n_sampling={args.n_sampling} is not supported. "
-        f"Supported values are: {list(GPQA_METRICS.keys())}."
+        f"Supported values are: {list(KINA_PASS_AT_K_METRICS.keys())}."
     )
 
     if "gpt-5" in args.model_id:

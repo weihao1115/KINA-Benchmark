@@ -27,7 +27,12 @@ def list_to_table(data_list, headers=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_name", type=str, default="KINA-899")
+    parser.add_argument(
+        "--data_name",
+        type=str,
+        default="KINA-899-format-indexed",
+        help="Result basename (without .json) under results/.../.../",
+    )
     parser.add_argument("--backup", action="store_true")
     args = parser.parse_args()
 
