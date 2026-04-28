@@ -20,7 +20,7 @@ _EXTRACTION_METRIC = multilingual_extractive_match_metric(
 )
 
 # n parallel samples per question -> lighteval Pass@1 (compatible with A–J letter answers)
-KINA_PASS_AT_K_METRICS = {
+KINA_METRICS = {
     1: Metrics.gpqa_instruct_pass_at_1_1n.value,
     4: Metrics.gpqa_instruct_pass_at_1_4n.value,
     8: Metrics.gpqa_instruct_pass_at_1_8n.value,
@@ -97,13 +97,13 @@ def load_data(file_path: str) -> List[Dict[str, Any]]:
     return parsed
 
 
-def get_kina_pass_at_k_metric(n_sampling: int):
+def get_kina_metric(n_sampling: int):
     """Return the lighteval Pass@1 metric for n parallel completions (1, 4, or 8)."""
-    if n_sampling in KINA_PASS_AT_K_METRICS:
-        return KINA_PASS_AT_K_METRICS[n_sampling]
+    if n_sampling in KINA_METRICS:
+        return KINA_METRICS[n_sampling]
     raise ValueError(
         f"n_sampling={n_sampling} is not supported. "
-        f"Supported values are: {list(KINA_PASS_AT_K_METRICS.keys())}."
+        f"Supported values are: {list(KINA_METRICS.keys())}."
     )
 
 
@@ -151,7 +151,7 @@ def judge_score(metadata_doc: Dict, responses: List[str]):
         instruction=question,
     )
 
-    metric = get_kina_pass_at_k_metric(n_sampling)
+    metric = get_kina_metric(n_sampling)
     result = metric.compute(
         golds=[ground_truth],
         predictions=responses,
