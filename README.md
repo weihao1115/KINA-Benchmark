@@ -1,73 +1,77 @@
 # KINA-Benchmark
 
-## Environment Setup
+Tools to run model inference and **Pass@1** scoring on the **KINA** benchmark: multi-discipline questions with **one correct** option among lettered choices **A–J** (as in the public `KINA-899-format-indexed.json` release).
+
+> Scoring reuses [lighteval](https://github.com/huggingface/lighteval) letter-extraction and Pass@*k* metrics (the same multi-choice path used for other letter-style tasks in the library). The **dataset file format** is the indexed JSON described below, not the legacy labeling-platform export.
+
+## Environment setup
 
 ```bash
 conda create -n kina_bench python=3.10 -y && conda activate kina_bench
 pip install -e .
 ```
 
-### SGLang (Optional)
+### SGLang (optional)
 
-If you need to deploy local models using SGLang, install it separately:
+For local OpenAI-compatible servers (e.g. vLLM, SGLang), install the server stack you use; SGLang example:
 
 ```bash
 pip install sglang[all]
 ```
 
-Refer to the [SGLang documentation](https://github.com/sgl-project/sglang) for detailed installation instructions.
+See the [SGLang documentation](https://github.com/sgl-project/sglang) for details.
+
+## Data file
+
+1. Place the dataset JSON under **`KINA-Benchmark/data/`** (or symlink it from the monorepo root), using the name expected by `--data_name` (default: `KINA-899-format-indexed` → `data/KINA-899-format-indexed.json`).
+2. Example (from the parent KINA repo):
+
+   ```bash
+   mkdir -p data
+   ln -sf ../../data/KINA-899-format-indexed.json data/KINA-899-format-indexed.json
+   ```
+
+The expected format is a **JSON array** of 899 objects; each object includes at least:
+
+| Field | Type | Description |
+|--------|------|-------------|
+| `index` | int | Global index `0 .. 898` (stable id for runs and results) |
+| `discipline` | string | Subject / domain |
+| `question` | string | Full question text |
+| `options` | array | `{ "key", "answer", "explanation"?, "source"? }` per row |
+| `correct_answer` | string | Single letter `A`–`J` |
+| `question_source` | string | optional |
+| `question_material` | string | optional (e.g. images / context) |
+
+Internal runtime representation maps `discipline` → `metadata.category`, `question_source` → `metadata.source`, `question_material` → `metadata.materials`, and uses **`id` = `index`** for resume keys and result lines.
 
 ## Usage
 
-### Method 1: Commercial API
-
-Use commercial API endpoints directly (OpenAI, OpenRouter, etc.):
+### Commercial API (OpenAI, OpenRouter, etc.)
 
 ```bash
-# Set environment variables
-export OPENAI_BASE="https://api.openai.com/v1"        # or https://openrouter.ai/api/v1
+export OPENAI_BASE="https://api.openai.com/v1"   # or https://openrouter.ai/api/v1
 export OPENAI_KEY="your-api-key"
 
-# Run evaluation
 python src/kina_bench/run_openai_chat.py \
     --model_id "gpt-4o" \
-    --data_name "KINA-899" \
+    --data_name "KINA-899-format-indexed" \
     --n_thread 32
 ```
 
-You can also use a `.env` file in the project root (copy from `.env.example`):
+You can also use a `.env` in the project root (see `.env.example`).
+
+### Local OpenAI-compatible server (e.g. SGLang)
+
+**1. Start the server** (example):
 
 ```bash
-cp .env.example .env
-# Edit .env with your API credentials
-```
-
-### Method 2: Local Model with SGLang
-
-Deploy a local model server using SGLang, then run evaluation:
-
-**Step 1: Start SGLang Server**
-
-```bash
-# Basic usage
 python -m sglang.launch_server \
     --model-path Qwen/Qwen3-8B \
     --port 8000
-
-# With thinking/reasoning mode (for Qwen3 series)
-python -m sglang.launch_server \
-    --model-path Qwen/Qwen3-8B \
-    --port 8000 \
-    --reasoning-parser qwen3
-
-# Multi-GPU with tensor parallelism
-python -m sglang.launch_server \
-    --model-path Qwen/Qwen3-30B-A3B \
-    --port 8000 \
-    --tp 4
 ```
 
-**Step 2: Run Evaluation**
+**2. Run evaluation**
 
 ```bash
 export OPENAI_BASE="http://localhost:8000/v1"
@@ -75,149 +79,73 @@ export OPENAI_KEY="EMPTY"
 
 python src/kina_bench/run_openai_chat.py \
     --model_id "Qwen/Qwen3-8B" \
-    --data_name "KINA-899" \
+    --data_name "KINA-899-format-indexed" \
     --n_thread 64
 ```
 
-### Command Line Arguments
+### Command-line arguments
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--model_id` | (required) | Model identifier |
-| `--data_name` | `KINA-899` | Dataset name (without `.json` extension) |
-| `--n_sampling` | `1` | Number of samples per question (1, 4, or 8) |
-| `--max_tokens` | `16384` | Maximum output tokens |
-| `--think_mode` | `none` | Thinking mode: `none`, `think`, or `nothink` |
-| `--reasoning_effort` | `None` | Reasoning effort for o1/gpt-5 series: `low`, `medium`, `high` |
-| `--n_thread` | `1` | Number of concurrent threads |
-| `--overwrite` | `False` | Overwrite existing results |
-| `--timeout` | `300` | Timeout in seconds for each API request |
-| `--limit` | `None` | Limit total number of data samples for debugging |
-| `--skip_inference` | `False` | Skip inference, only run evaluation (see note below) |
+| `--model_id` | (required) | Model id passed to the API |
+| `--data_name` | `KINA-899-format-indexed` | Basename of `data/{data_name}.json` (no extension) |
+| `--n_sampling` | `1` | Parallel completions per question: **1, 4, or 8** |
+| `--max_tokens` | `16384` | Max output tokens (or completion budget where applicable) |
+| `--think_mode` | `none` | `none`, `think`, or `nothink` (Qwen-style chat template) |
+| `--reasoning_effort` | `None` | For o1 / GPT-5 family: `low`, `medium`, `high` |
+| `--n_thread` | `1` | Concurrent requests |
+| `--overwrite` | `False` | Overwrite an existing `jsonl` from scratch |
+| `--timeout` | `300` | Per-request timeout (seconds) |
+| `--limit` | `None` | Cap how many *remaining* items to run (debug) |
+| `--skip_inference` | `False` | Skip API calls; only evaluate existing `jsonl` if complete |
 
-> **Note on `--skip_inference`**: If some samples fail during inference, the evaluation stage will not run by default. You need to re-run the same command to resume and retry the failed samples. If you want to evaluate the successfully completed samples first, add `--skip_inference` to your command.
+> **`--skip_inference`**: If some items failed in inference, post-processing (aggregate JSON) is skipped until the set is complete. Re-run the same command to resume, or use `--skip_inference` to force scoring on whatever finished.
 
-### View Results
+### View aggregated scores
 
 ```bash
-python src/kina_bench/pretty_print.py --data_name KINA-899
+python src/kina_bench/pretty_print.py --data_name KINA-899-format-indexed
 ```
 
-## Data Format
+## Output layout
 
-### Input: `data/{data_name}.json`
+### Intermediate: `results/{model_id}/n{n}_tokens{max}/{data_name}.jsonl`
 
-The input data is exported from a labeling platform with the following structure:
+One JSON object per line: `id` (question index), `request`, `responses` (list of `content` / `reasoning`), `metadata` (full parsed row), token usage.
 
-```json
-[
-    {
-        "_id": "68da951b00128015648efdc9",
-        "batchId": "68da951b00128015648efdc4",
-        "labels": [
-            {
-                "data": {
-                    "hash": "GPQA_QUESTION",
-                    "value": "Which of the following statements...",
-                    "correctAnswer": "C"
-                }
-            },
-            {
-                "data": {
-                    "hash": "GPQA_TYPE",
-                    "value": "Sociology/Sociology/Social and Folklore Studies"
-                }
-            },
-            {
-                "data": {
-                    "hash": "A",
-                    "answer": "Option A content...",
-                    "explanation": "Explanation for option A..."
-                }
-            },
-            {
-                "data": {
-                    "hash": "B",
-                    "answer": "Option B content...",
-                    "explanation": "..."
-                }
-            }
-        ]
-    }
-]
-```
+### Final: `results/{model_id}/n{n}_tokens{max}/{data_name}.json`
 
-Key fields:
-- `GPQA_QUESTION`: Question text and correct answer
-- `GPQA_TYPE`: Category/domain of the question
-- `A`, `B`, `C`, ...: Answer options (up to J)
-
-### Output: `results/{model_name}/n{n_sampling}_tokens{max_tokens}/`
-
-**Intermediate file: `{data_name}.jsonl`**
-
-Each line is a JSON object containing raw inference results:
+List of:
 
 ```json
 {
-    "id": "68da951b00128015648efdec",
-    "request": "[{\"role\": \"user\", \"content\": \"Answer the following...\"}]",
-    "responses": [
-        {"content": "Let me analyze...\n\nAnswer: A", "reasoning": null},
-        {"content": "After careful thought...\n\nAnswer: A", "reasoning": null}
-    ],
-    "metadata": {
-        "id": "...",
-        "question": "...",
-        "options": {"A": {...}, "B": {...}},
-        "ground_truth": "A"
-    },
-    "total_input_tokens": 1234,
-    "total_output_tokens": 567
+    "id": 0,
+    "score": 0.75,
+    "extracted_predictions": [["A", "A"], ["B", "B"]],
+    "gt": "A"
 }
 ```
 
-**Final file: `{data_name}.json`**
+- `score`: Pass@1 in `[0, 1]`
+- `extracted_predictions`: one list of extracted letters per parallel sample
+- `gt`: `correct_answer` from the dataset
 
-Evaluation results with scores:
-
-```json
-[
-    {
-        "id": "68da951b00128015648efdec",
-        "score": 0.75,
-        "extracted_predictions": [
-            ["A", "A"],
-            ["A", "A"],
-            ["A", "A"],
-            ["H", "H"]
-        ],
-        "gt": "A"
-    }
-]
-```
-
-Fields:
-- `score`: pass@1 score (0.0 to 1.0)
-- `extracted_predictions`: Extracted answers for each response (list of lists)
-- `gt`: Ground truth answer
-
-## Directory Structure
+## Repository layout
 
 ```
-kina_bench/
+KINA-Benchmark/
 ├── data/
-│   └── KINA-899.json              # Input dataset
+│   └── KINA-899-format-indexed.json   # add or symlink (not committed by default)
 ├── results/
-│   └── {model_name}/
+│   └── {model_id}/
 │       └── n{n}_tokens{max}/
-│           ├── {data_name}.jsonl     # Raw inference results
-│           └── {data_name}.json      # Evaluation scores
+│           ├── {data_name}.jsonl
+│           └── {data_name}.json
 ├── src/
 │   └── kina_bench/
-│       ├── run_openai_chat.py        # Main inference script
-│       ├── utils.py                  # Data loading and scoring
-│       ├── pretty_print.py           # Results visualization
-│       └── config.py                 # Project configuration
+│       ├── run_openai_chat.py
+│       ├── utils.py
+│       ├── pretty_print.py
+│       └── config.py
 └── pyproject.toml
 ```

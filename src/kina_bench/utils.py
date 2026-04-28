@@ -1,7 +1,7 @@
 import json
 import logging
 from string import ascii_uppercase
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 
 from lighteval.metrics.metrics import Metrics
 from lighteval.metrics.dynamic_metrics import multilingual_extractive_match_metric
@@ -12,8 +12,6 @@ from lighteval.tasks.requests import Doc
 logger = logging.getLogger(__name__)
 
 
-# Module-level singleton for answer extraction
-# Uses the same extraction logic as gpqa_instruct_pass_at_1_Xn internally
 _EXTRACTION_METRIC = multilingual_extractive_match_metric(
     language=Language.ENGLISH,
     gold_extraction_target=[IndicesExtractionConfig(prefix_for_extraction="NativeLetters")],
@@ -21,65 +19,106 @@ _EXTRACTION_METRIC = multilingual_extractive_match_metric(
     precision=6,
 )
 
+# n parallel samples per question -> lighteval Pass@1 (compatible with A–J letter answers)
+KINA_PASS_AT_K_METRICS = {
+    1: Metrics.gpqa_instruct_pass_at_1_1n.value,
+    4: Metrics.gpqa_instruct_pass_at_1_4n.value,
+    8: Metrics.gpqa_instruct_pass_at_1_8n.value,
+}
 
-def load_data(file_path):
-    with open(file_path, 'r', encoding='utf-8') as f:
+
+def _options_list_to_map(options: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+    for opt in options or []:
+        key = opt.get("key")
+        if not key or not isinstance(key, str):
+            continue
+        key = key.strip().upper()
+        out[key] = {
+            "id": key,
+            "answer": (opt.get("answer") or "").strip() if opt.get("answer") is not None else "",
+            "explanation": opt.get("explanation"),
+            "source": opt.get("source"),
+        }
+    return out
+
+
+def load_data(file_path: str) -> List[Dict[str, Any]]:
+    """
+    Load KINA items from a JSON array (e.g. KINA-899-format-indexed.json).
+
+    Expected fields per item:
+    - index: int, global question index (0..N-1)
+    - question: str
+    - options: list of {key, answer, explanation?, source?}
+    - correct_answer: str (A–J)
+    - discipline, question_source, question_material: optional metadata
+    """
+    with open(file_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    parsed_questions = []
+    if not isinstance(data, list):
+        raise ValueError(f"Root JSON must be a list, got {type(data)}")
 
+    parsed: List[Dict[str, Any]] = []
     for item in data:
-        question_data = {
-            'id': item['_id'],
-            'batch_id': item['batchId'],
-            'question': None,
-            'options': {},
-            'ground_truth': None,
-            'category': None,
-            'source': None,
-            'materials': None,
-        }
+        if not isinstance(item, dict):
+            continue
+        if "index" not in item or "question" not in item:
+            raise ValueError("Each item must include 'index' and 'question'")
 
-        for label in item['labels']:
-            label_type = label['data']['hash']
+        idx = item["index"]
+        if not isinstance(idx, int):
+            try:
+                idx = int(idx)
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"Invalid index: {item.get('index')!r}") from e
 
-            if label_type == 'GPQA_QUESTION':
-                question_data['question'] = label['data']['value']
-                question_data['ground_truth'] = label['data'].get('correctAnswer')
+        options = _options_list_to_map(item.get("options") or [])
+        ground = item.get("correct_answer")
+        if ground is not None and isinstance(ground, str):
+            ground = ground.strip().upper()
+        if not ground or len(ground) != 1 or ground not in ascii_uppercase[:10]:
+            logger.warning("Item index=%s: invalid or missing correct_answer: %r", idx, item.get("correct_answer"))
 
-            elif label_type == 'GPQA_TYPE':
-                question_data['category'] = label['data']['value']
+        parsed.append(
+            {
+                "id": idx,
+                "question": item["question"],
+                "options": options,
+                "ground_truth": ground,
+                "category": item.get("discipline"),
+                "source": item.get("question_source"),
+                "materials": item.get("question_material"),
+            }
+        )
 
-            elif label_type == 'GPQA_SOURCE':
-                question_data['source'] = label['data']['value']
-
-            elif label_type == 'GPQA_MATERIAL':
-                question_data['materials'] = label['data']['value']
-
-            elif label_type in ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J']:
-                question_data['options'][label_type] = {
-                    'id': label['data']['id'],
-                    'answer': label['data']['answer'],
-                    'explanation': label['data'].get('explanation'),
-                    'source': label['data'].get('source')
-                }
-
-        parsed_questions.append(question_data)
-
-    return parsed_questions
+    parsed.sort(key=lambda d: d["id"])
+    return parsed
 
 
-prompt_template = """Answer the following multiple choice question. There is only one correct answer. The last line of your response should be in the format ’Answer: $LETTER’ (without quotes), where LETTER is one of A, B, C, D, E, F, G, H, I, or J. Think step by step before answering.
-Question: 
+def get_kina_pass_at_k_metric(n_sampling: int):
+    """Return the lighteval Pass@1 metric for n parallel completions (1, 4, or 8)."""
+    if n_sampling in KINA_PASS_AT_K_METRICS:
+        return KINA_PASS_AT_K_METRICS[n_sampling]
+    raise ValueError(
+        f"n_sampling={n_sampling} is not supported. "
+        f"Supported values are: {list(KINA_PASS_AT_K_METRICS.keys())}."
+    )
+
+
+prompt_template = """Answer the following multiple choice question. There is only one correct answer. The last line of your response should be in the format 'Answer: $LETTER' (without quotes), where LETTER is one of A, B, C, D, E, F, G, H, I, or J. Think step by step before answering.
+Question:
 {question}
 Options:
 {options}"""
 
 
-def get_messages(doc):
-    question = doc['question']
-    options = doc['options']
-    option_str = "\n".join([f"{letter}: {choice['answer'].strip()}" for letter, choice in options.items()])
+def get_messages(doc: Dict[str, Any]):
+    question = doc["question"]
+    options = doc["options"]
+    keys = sorted(options.keys())
+    option_str = "\n".join([f"{letter}: {options[letter]['answer'].strip()}" for letter in keys])
 
     messages = [
         {"role": "user", "content": prompt_template.format(question=question, options=option_str)}
@@ -87,72 +126,24 @@ def get_messages(doc):
     return messages
 
 
-GPQA_METRICS = {
-    1: Metrics.gpqa_instruct_pass_at_1_1n.value,
-    4: Metrics.gpqa_instruct_pass_at_1_4n.value,
-    8: Metrics.gpqa_instruct_pass_at_1_8n.value,
-}
-
-
-def get_gpqa_metric(n_sampling: int):
-    """Get the appropriate GPQA metric based on n_sampling."""
-    if n_sampling in GPQA_METRICS:
-        return GPQA_METRICS[n_sampling]
-    raise ValueError(
-        f"n_sampling={n_sampling} is not supported. "
-        f"Supported values are: {list(GPQA_METRICS.keys())}."
-    )
-
-
 def judge_score(metadata_doc: Dict, responses: List[str]):
     """
-    Judge the score of responses against the ground truth.
+    Compute Pass@1 vs ground truth and extract predicted letters per response (A–J).
 
-    This function performs two tasks:
-    1. Compute pass@1 score using gpqa_metric.compute()
-    2. Extract predictions from each response individually to get complete extracted_predictions
-
-    Why extract individually?
-    ─────────────────────────────────────────────────────────────────────────
-    lighteval's gpqa_instruct_pass_at_1_Xn metric internally uses the PassAtK class.
-    PassAtK.compute() loops over each response, calling sample_scoring_function for each.
-
-    The problem: each call to sample_scoring_function overwrites doc.specific["extracted_predictions"],
-    so only the last response's extraction result is retained.
-
-    Call chain:
-        PassAtK.compute()
-          └─> for pred in predictions:
-                └─> sample_scoring_function(pred, ref, doc)
-                      └─> multilingual_extractive_match_metric.sample_level_fn([ref], [pred], doc)
-                            └─> doc.specific["extracted_predictions"] = [current pred's extraction]
-                                                                          ↑ overwritten each time!
-
-    Therefore, we need to call the extraction logic separately for each response to get
-    the complete extracted_predictions. Verified by testing that individual extraction
-    results are identical to those produced inside compute's internal loop.
-    ─────────────────────────────────────────────────────────────────────────
-
-    Args:
-        metadata_doc: Document metadata containing question, options, and ground_truth
-        responses: List of model responses to evaluate
-
-    Returns:
-        dict with:
-            - 'score': float, pass@1 score (0.0 to 1.0)
-            - 'extracted_predictions': List[str], extracted answer letter for each response
+    lighteval's PassAtK + extractive match overwrite `doc.specific["extracted_predictions"]`
+    on each inner call, so we run extraction once per response with a fresh Doc, same as before.
     """
     question = metadata_doc["question"]
     options = metadata_doc["options"]
     ground_truth = metadata_doc["ground_truth"]
 
     n_sampling = len(responses)
-    num_choices = len(options)
-    choices = list(ascii_uppercase[:num_choices])
-    correct_index = ascii_uppercase.index(ground_truth)
+    keys = sorted(options.keys())
+    choices = keys
+    if ground_truth not in options:
+        raise ValueError(f"ground_truth {ground_truth!r} is not in options {keys}")
+    correct_index = keys.index(ground_truth)
 
-    # ========== Step 1: Compute pass@1 score using gpqa_metric ==========
-    # Create Doc object for gpqa_metric.compute()
     doc_for_score = Doc(
         query=question,
         choices=choices,
@@ -160,33 +151,23 @@ def judge_score(metadata_doc: Dict, responses: List[str]):
         instruction=question,
     )
 
-    gpqa_metric = get_gpqa_metric(n_sampling)
-    result = gpqa_metric.compute(
+    metric = get_kina_pass_at_k_metric(n_sampling)
+    result = metric.compute(
         golds=[ground_truth],
         predictions=responses,
         formatted_doc=doc_for_score,
     )
     score = list(result.values())[0]
 
-    # ========== Step 2: Extract predictions from each response individually ==========
-    # Uses the module-level singleton _EXTRACTION_METRIC, same extraction logic as gpqa_metric
-    # Return format: [[preds_for_resp1], [preds_for_resp2], ...], each sublist corresponds to one response
-    extracted_predictions = []
-
+    extracted_predictions: List[List[str]] = []
     for resp in responses:
-        # Create an independent Doc object for each response to avoid overwrite issues
         doc_for_extraction = Doc(
             query=question,
             choices=choices,
             gold_index=correct_index,
             instruction=question,
         )
-
-        # Call sample_level_fn for extraction
-        # Note: the golds argument does not affect extraction results, only score computation
         _EXTRACTION_METRIC.sample_level_fn([ground_truth], [resp], doc_for_extraction)
-
-        # Get extraction results from doc.specific
         if doc_for_extraction.specific:
             preds = doc_for_extraction.specific.get("extracted_predictions", [])
             extracted_predictions.append(preds)
@@ -196,8 +177,12 @@ def judge_score(metadata_doc: Dict, responses: List[str]):
     return dict(score=score, extracted_predictions=extracted_predictions)
 
 
-if __name__ == '__main__':
-    data = load_data('data/SGPQA-Diamond.json')
+if __name__ == "__main__":
+    from kina_bench.config import PROJECT_ROOT
+    from os.path import join
+
+    sample = join(PROJECT_ROOT, "data", "KINA-899-format-indexed.json")
+    data = load_data(sample)
     for doc in data[:3]:
         messages = get_messages(doc)
         print(messages)
